@@ -32,6 +32,19 @@ function formantCorrelation(vecA: number[], vecB: number[]): number {
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
+// Z-score normalized Euclidean distance on formant differential envelope
+function zScoreDistance(vecA: number[], vecB: number[]): number {
+  if (!vecA || !vecB || vecA.length !== vecB.length || vecA.length === 0) return 999;
+  const meanA = vecA.reduce((s, x) => s + x, 0) / vecA.length;
+  const meanB = vecB.reduce((s, x) => s + x, 0) / vecB.length;
+  const stdA = Math.sqrt(vecA.reduce((s, x) => s + Math.pow(x - meanA, 2), 0) / vecA.length) || 1;
+  const stdB = Math.sqrt(vecB.reduce((s, x) => s + Math.pow(x - meanB, 2), 0) / vecB.length) || 1;
+  let sumSq = 0;
+  for (let i = 0; i < vecA.length; i++) {
+    sumSq += Math.pow((vecA[i] - meanA) / stdA - (vecB[i] - meanB) / stdB, 2);
+  }
+  return Math.sqrt(sumSq / vecA.length);
+}
 
 export async function POST(request: Request) {
   try {
@@ -72,69 +85,77 @@ export async function POST(request: Request) {
     }
 
     // =========================================================================
-    // 3. STRICT 4-GATE BIOMETRIC VERIFICATION (INTRUDER-PROOF & SORE/LOUD RESILIENT)
+    // 3. 12-POINT BIOMETRIC ENSEMBLE EVALUATION (REQUIRES >= 7 OUT OF 12 TO PASS)
     // =========================================================================
 
-    // GATE 1: Fundamental Frequency (F0) Pitch Lock
-    // Allows natural vocal effort (louder speech) or hoarseness (sore throat) pitch shifts (~15% of baseline),
-    // but strictly blocks foreign speakers with distinct vocal cord anatomy.
     const pitchDiffHz = Math.abs(enrolled.f0 - incoming.f0);
-    const MAX_ALLOWED_HZ_DIFF = Math.max(16.0, Math.min(22.0, enrolled.f0 * 0.15));
+    const maxPitchAllowed = Math.max(16.0, enrolled.f0 * 0.15);
+    const pitchRatio = incoming.f0 / enrolled.f0;
 
-    if (pitchDiffHz > MAX_ALLOWED_HZ_DIFF) {
-      return NextResponse.json({
-        verified: false,
-        error: `Intruder Blocked (Pitch Mismatch)! Owner: ${enrolled.f0.toFixed(1)} Hz | Speaker: ${incoming.f0.toFixed(1)} Hz (Δ ${pitchDiffHz.toFixed(1)} Hz > ${MAX_ALLOWED_HZ_DIFF.toFixed(1)} Hz limit).`,
-      }, { status: 403 });
-    }
-
-    // GATE 2: Vocal Tract Spectral Centroid Lock (Timbre & Resonance Center)
-    // Speaking louder naturally boosts higher harmonics, raising centroid upwards (+80 to +260 Hz).
-    // A sore throat dampens high-frequency harmonic energy, shifting centroid downwards.
-    const centroidDiffHz = Math.abs(enrolled.centroid - incoming.centroid);
     const isLouder = incoming.f0 >= enrolled.f0;
-    const MAX_CENTROID_DIFF = isLouder ? 280.0 : 220.0;
+    const maxCentroidAllowed = isLouder ? 280.0 : 200.0;
+    const centroidDiffHz = Math.abs(enrolled.centroid - incoming.centroid);
 
-    if (centroidDiffHz > MAX_CENTROID_DIFF) {
-      return NextResponse.json({
-        verified: false,
-        error: `Intruder Blocked (Vocal Tract Timbre Mismatch)! Owner Resonance: ${enrolled.centroid.toFixed(0)} Hz | Speaker: ${incoming.centroid.toFixed(0)} Hz (Δ ${centroidDiffHz.toFixed(0)} Hz > ${MAX_CENTROID_DIFF.toFixed(0)} Hz limit).`,
-      }, { status: 403 });
+    const fullCorr = formantCorrelation(enrolled.formantDiffs, incoming.formantDiffs);
+    const lowCorr = formantCorrelation(enrolled.formantDiffs.slice(0, 7), incoming.formantDiffs.slice(0, 7));
+    const midHighCorr = formantCorrelation(enrolled.formantDiffs.slice(6), incoming.formantDiffs.slice(6));
+    const zDist = zScoreDistance(enrolled.formantDiffs, incoming.formantDiffs);
+
+    // Formant peak alignment: verify local resonance maxima coincide
+    let peakMatches = 0, totalPeaks = 0;
+    for (let i = 1; i < enrolled.formantDiffs.length - 1; i++) {
+      const isEnrolledPeak = enrolled.formantDiffs[i] > enrolled.formantDiffs[i-1] && enrolled.formantDiffs[i] > enrolled.formantDiffs[i+1];
+      if (isEnrolledPeak) {
+        totalPeaks++;
+        const isIncomingPeak = incoming.formantDiffs[i] > incoming.formantDiffs[i-1] && incoming.formantDiffs[i] > incoming.formantDiffs[i+1];
+        if (isIncomingPeak) peakMatches++;
+      }
     }
+    const peakMatchRatio = totalPeaks > 0 ? peakMatches / totalPeaks : 0;
 
-    // GATE 3: Vocal Tract Anatomical Resonance Lock (Pearson Correlation)
-    // Vocal tract length, oral cavity geometry, and throat dimensions are unique anatomical invariants
-    // that remain consistent whether speaking louder or with a mild sore throat.
-    const shapeCorr = formantCorrelation(enrolled.formantDiffs, incoming.formantDiffs);
-    const MIN_FORMANT_CORR = 0.70;
-
-    if (shapeCorr < MIN_FORMANT_CORR) {
-      return NextResponse.json({
-        verified: false,
-        error: `Intruder Blocked (Throat Formant Mismatch)! Vocal tract resonance match: ${(shapeCorr * 100).toFixed(1)}% (Minimum ${(MIN_FORMANT_CORR * 100).toFixed(0)}% required).`,
-      }, { status: 403 });
-    }
-
-    // GATE 4: Multi-Factor Composite Biometric Confidence Lock
-    // Combines anatomical throat formants (60%), pitch proximity (25%), and resonance timbre (15%).
-    const pitchScore = Math.max(0, 1 - pitchDiffHz / MAX_ALLOWED_HZ_DIFF);
-    const centroidScore = Math.max(0, 1 - centroidDiffHz / MAX_CENTROID_DIFF);
-    const shapeScore = Math.max(0, shapeCorr);
-
+    // Multi-factor composite confidence
+    const pitchScore = Math.max(0, 1 - pitchDiffHz / maxPitchAllowed);
+    const centroidScore = Math.max(0, 1 - centroidDiffHz / maxCentroidAllowed);
+    const shapeScore = Math.max(0, fullCorr);
     const compositeScore = (shapeScore * 0.60 + pitchScore * 0.25 + centroidScore * 0.15) * 100;
-    const MIN_COMPOSITE = shapeCorr >= 0.80 ? 60.0 : 68.0;
 
-    if (compositeScore < MIN_COMPOSITE) {
+    // The 12 Biometric Test Cases
+    const biometricTests = [
+      { id: 1, name: 'Fundamental Pitch Window Lock (<= 16 Hz / 15%)', passed: pitchDiffHz <= maxPitchAllowed },
+      { id: 2, name: 'Vocal Register Consistency (<= 12%)', passed: Math.abs(pitchRatio - 1) <= 0.12 },
+      { id: 3, name: 'Spectral Centroid Timbre Lock', passed: centroidDiffHz <= maxCentroidAllowed },
+      { id: 4, name: 'Resonance Center Proximity (<= 120 Hz)', passed: centroidDiffHz <= 120.0 },
+      { id: 5, name: 'Primary Anatomical Formant Match (>= 68%)', passed: fullCorr >= 0.68 },
+      { id: 6, name: 'High-Confidence Formant Match (>= 75%)', passed: fullCorr >= 0.75 },
+      { id: 7, name: 'Vocal Tract Ultra-Fidelity Match (>= 82%)', passed: fullCorr >= 0.82 },
+      { id: 8, name: 'Low-Band Oral Formant Resonance (>= 75%)', passed: lowCorr >= 0.75 },
+      { id: 9, name: 'Upper-Band Pharyngeal Resonance (>= 70%)', passed: midHighCorr >= 0.70 },
+      { id: 10, name: 'Normalized Formant Shape Distance (<= 0.65)', passed: zDist <= 0.65 },
+      { id: 11, name: 'Formant Resonance Peak Alignment (>= 75%)', passed: peakMatchRatio >= 0.75 },
+      { id: 12, name: 'Composite Biometric Confidence (>= 68%)', passed: compositeScore >= 68.0 }
+    ];
+
+    const passedCount = biometricTests.filter(t => t.passed).length;
+    const REQUIRED_PASSES = 7;
+
+    if (passedCount < REQUIRED_PASSES) {
+      const failedNames = biometricTests.filter(t => !t.passed).map(t => t.name).slice(0, 3).join(', ');
       return NextResponse.json({
         verified: false,
-        error: `Intruder Blocked (Biometric Confidence Low)! Composite biometric confidence: ${compositeScore.toFixed(1)}% (Minimum ${MIN_COMPOSITE.toFixed(0)}% required).`,
+        passedCount,
+        totalTests: 12,
+        error: `Intruder Blocked! Passed ${passedCount}/12 biometric criteria (Minimum ${REQUIRED_PASSES} required). Failed: ${failedNames}...`,
+        tests: biometricTests
       }, { status: 403 });
     }
 
     await supabase.from('users').update({ current_challenge: null }).eq('id', user.id);
     return NextResponse.json({
       verified: true,
-      message: `Identity Confirmed! Pitch: ${incoming.f0.toFixed(1)} Hz (Δ ${pitchDiffHz.toFixed(1)} Hz) | Biometric Match: ${compositeScore.toFixed(1)}%`
+      passedCount,
+      totalTests: 12,
+      message: `Identity Confirmed! Passed ${passedCount}/12 Biometric Tests | Confidence: ${compositeScore.toFixed(1)}% | Formant Match: ${(fullCorr * 100).toFixed(1)}%`,
+      tests: biometricTests
     });
   } catch (error: any) {
     return NextResponse.json({ error: error.message }, { status: 500 });
