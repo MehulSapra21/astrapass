@@ -2,9 +2,11 @@
 
 import { useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation'; // <-- Added Router
 import { startRegistration, startAuthentication } from '@simplewebauthn/browser';
 
 export default function Home() {
+  const router = useRouter(); // <-- Initialized Router
   const [username, setUsername] = useState('');
   const [status, setStatus] = useState({ type: '', message: '' });
   const [activeTab, setActiveTab] = useState<'passkey' | 'voice' | 'recovery'>('passkey');
@@ -75,7 +77,11 @@ export default function Home() {
       const verifyJSON = await verifyResp.json();
 
       if (verifyJSON.error) throw new Error(verifyJSON.error);
-      if (verifyJSON.verified) setStatus({ type: 'success', message: '🔓 Identity Verified. Welcome back.' });
+      if (verifyJSON.verified) {
+        setStatus({ type: 'success', message: '🔓 Identity Verified. Redirecting...' });
+        // Redirect to Dashboard after 1 second so the user sees the success message
+        setTimeout(() => router.push('/dashboard'), 1000); 
+      }
     } catch (error: any) {
       setStatus({ type: 'error', message: error.message });
     }
@@ -130,8 +136,10 @@ export default function Home() {
         const data = await resp.json();
         if (data.error) throw new Error(data.error);
         if (data.verified) {
-          setStatus({ type: 'success', message: '🎙️ Acoustic signature confirmed. Access granted.' });
+          setStatus({ type: 'success', message: '🎙️ Acoustic signature confirmed. Redirecting...' });
           setVoiceChallenge('');
+          // Redirect to Dashboard after 1 second
+          setTimeout(() => router.push('/dashboard'), 1000);
         }
       } catch (error: any) {
         setStatus({ type: 'error', message: error.message });
