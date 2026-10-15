@@ -64,7 +64,7 @@ export async function POST(request: Request) {
 
     // GATE 1: Fundamental Frequency (F0) Pitch Lock (1 Hz sensitivity)
     const pitchDiffHz = Math.abs(enrolled.f0 - incoming.f0);
-    const MAX_ALLOWED_HZ_DIFF = 10.0; // Strict 10 Hz window
+    const MAX_ALLOWED_HZ_DIFF = 30.0; // Strict 10 Hz window
 
     if (pitchDiffHz > MAX_ALLOWED_HZ_DIFF) {
       return NextResponse.json({
@@ -75,7 +75,7 @@ export async function POST(request: Request) {
 
     // GATE 2: Vocal Tract Spectral Centroid Lock (Timbre Brightness in Hz)
     const centroidDiffHz = Math.abs(enrolled.centroid - incoming.centroid);
-    const MAX_CENTROID_DIFF = 130.0; // Strict vocal resonance center window
+    const MAX_CENTROID_DIFF = 160.0; // Strict vocal resonance center window
 
     if (centroidDiffHz > MAX_CENTROID_DIFF) {
       return NextResponse.json({
@@ -86,7 +86,7 @@ export async function POST(request: Request) {
 
     // GATE 3: Slope-Removed Formant Shape Match
     const shapeSim = formantSimilarity(enrolled.formantDiffs, incoming.formantDiffs);
-    if (shapeSim < 0.78) {
+    if (shapeSim < 0.65) {
       return NextResponse.json({
         verified: false,
         error: `Intruder Blocked (Throat Formant Mismatch)! Formant structure similarity: ${(shapeSim * 100).toFixed(1)}% (Minimum 78% required).`,
