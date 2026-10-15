@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import Link from 'next/link';
 import { startRegistration, startAuthentication } from '@simplewebauthn/browser';
 
 export default function Home() {
@@ -198,8 +199,14 @@ export default function Home() {
       <div className="w-full max-w-lg rounded-3xl border border-slate-800 bg-slate-900/80 p-8 shadow-2xl backdrop-blur-xl transition-all">
         
         {/* HEADER */}
-        <div className="mb-8 text-center">
-          <h1 className="mb-2 text-4xl font-extrabold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-emerald-400 drop-shadow-md">
+        <div className="mb-8 text-center relative">
+          <Link
+            href="/admin"
+            className="absolute right-0 top-0 text-[11px] font-bold uppercase tracking-wider text-slate-500 hover:text-blue-400 transition-colors border border-slate-800 rounded-lg px-2.5 py-1 bg-slate-950/60"
+          >
+            Admin 🛡️
+          </Link>
+          <h1 className="mb-2 mt-4 text-4xl font-extrabold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-emerald-400 drop-shadow-md">
             AstraPass
           </h1>
           <p className="text-xs font-medium uppercase tracking-widest text-slate-400">
