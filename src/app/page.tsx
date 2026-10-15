@@ -19,8 +19,9 @@ async function getWavLMEngine(onProgress?: (msg: string) => void) {
     if (onProgress) {
       onProgress('🧠 Loading Microsoft WavLM-Base-Plus-SV Neural Network (~100MB, cached after 1st run)...');
     }
-    const { AutoProcessor, AutoModel, env } = await import(
-      /* webpackIgnore: true */ 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.4.1'
+    const importModule = new Function('url', 'return import(url)');
+    const { AutoProcessor, AutoModel, env } = await importModule(
+      'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.4.1'
     );
     env.allowLocalModels = false;
 
