@@ -1,8 +1,7 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
 
 body {
-  background-color: #0f172a; /* Dark slate background */
-  color: #f8fafc; /* Light text */
+  background-color: #020617; /* Slate 950 */
+  color: #f8fafc; /* Slate 50 */
+  font-family: ui-sans-serif, system-ui, sans-serif;
 }
