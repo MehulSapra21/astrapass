@@ -1,12 +1,14 @@
 'use client';
 
 import { useState } from 'react';
+import Link from 'next/link';
 import { startRegistration, startAuthentication } from '@simplewebauthn/browser';
 
 export default function Home() {
   const [username, setUsername] = useState('');
   const [status, setStatus] = useState({ type: '', message: '' });
   const [activeTab, setActiveTab] = useState<'passkey' | 'voice' | 'recovery'>('passkey');
+  const [isProcessing, setIsProcessing] = useState(false);
 
   // --- VOICE STATE ---
   const [voiceChallenge, setVoiceChallenge] = useState('');
@@ -21,8 +23,9 @@ export default function Home() {
 
   // --- 1. PASSKEY FLOWS ---
   const handleRegister = async () => {
-    if (!username) return setStatus({ type: 'error', message: 'Enter a username.' });
-    setStatus({ type: 'info', message: 'Generating passkey...' });
+    if (!username) return setStatus({ type: 'error', message: 'Enter a username first.' });
+    setStatus({ type: 'info', message: 'Generating hardware passkey...' });
+    setIsProcessing(true);
     try {
       const resp = await fetch('/api/webauthn/register/generate', {
         method: 'POST',
@@ -30,7 +33,7 @@ export default function Home() {
         body: JSON.stringify({ username }),
       });
       const optionsJSON = await resp.json();
-      if (optionsJSON.error) throw new Error(`Server: ${optionsJSON.error}`);
+      if (optionsJSON.error) throw new Error(optionsJSON.error);
 
       const attResp = await startRegistration({ optionsJSON });
 
@@ -42,15 +45,17 @@ export default function Home() {
       const verifyJSON = await verifyResp.json();
 
       if (verifyJSON.error) throw new Error(verifyJSON.error);
-      if (verifyJSON.verified) setStatus({ type: 'success', message: '✅ Passkey registered successfully!' });
+      if (verifyJSON.verified) setStatus({ type: 'success', message: '✅ Hardware Passkey secured!' });
     } catch (error: any) {
       setStatus({ type: 'error', message: error.message });
     }
+    setIsProcessing(false);
   };
 
   const handleLogin = async () => {
     if (!username) return setStatus({ type: 'error', message: 'Enter a username.' });
-    setStatus({ type: 'info', message: 'Waiting for passkey...' });
+    setStatus({ type: 'info', message: 'Awaiting biometric verification...' });
+    setIsProcessing(true);
     try {
       const resp = await fetch('/api/webauthn/login/generate', {
         method: 'POST',
@@ -58,7 +63,7 @@ export default function Home() {
         body: JSON.stringify({ username }),
       });
       const optionsJSON = await resp.json();
-      if (optionsJSON.error) throw new Error(`Server: ${optionsJSON.error}`);
+      if (optionsJSON.error) throw new Error(optionsJSON.error);
 
       const asseResp = await startAuthentication({ optionsJSON });
 
@@ -70,16 +75,18 @@ export default function Home() {
       const verifyJSON = await verifyResp.json();
 
       if (verifyJSON.error) throw new Error(verifyJSON.error);
-      if (verifyJSON.verified) setStatus({ type: 'success', message: '🔓 Logged in securely with Passkey.' });
+      if (verifyJSON.verified) setStatus({ type: 'success', message: '🔓 Identity Verified. Welcome back.' });
     } catch (error: any) {
       setStatus({ type: 'error', message: error.message });
     }
+    setIsProcessing(false);
   };
 
   // --- 2. VOICE FLOWS ---
   const requestVoiceChallenge = async () => {
     if (!username) return setStatus({ type: 'error', message: 'Enter a username.' });
-    setStatus({ type: 'info', message: 'Generating acoustic challenge...' });
+    setStatus({ type: 'info', message: 'Establishing secure acoustic channel...' });
+    setIsProcessing(true);
     try {
       const resp = await fetch('/api/ivr/challenge', {
         method: 'POST',
@@ -89,15 +96,16 @@ export default function Home() {
       const data = await resp.json();
       if (data.error) throw new Error(data.error);
       setVoiceChallenge(data.challengePhrase);
-      setStatus({ type: 'info', message: 'Audio challenge generated. Speak the phrase below.' });
+      setStatus({ type: 'info', message: 'Channel open. Speak the phrase below.' });
     } catch (error: any) {
       setStatus({ type: 'error', message: error.message });
     }
+    setIsProcessing(false);
   };
 
   const listenAndVerify = () => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) return setStatus({ type: 'error', message: 'Speech API not supported.' });
+    if (!SpeechRecognition) return setStatus({ type: 'error', message: 'Speech API not supported in this browser.' });
 
     const recognition = new SpeechRecognition();
     recognition.lang = 'en-US';
@@ -105,13 +113,13 @@ export default function Home() {
 
     recognition.onstart = () => {
       setIsListening(true);
-      setStatus({ type: 'info', message: '🎤 Listening... Please speak the phrase.' });
+      setStatus({ type: 'info', message: '🎤 Microphone hot. Verifying acoustics...' });
     };
 
     recognition.onresult = async (event: any) => {
       setIsListening(false);
       const transcript = event.results[0][0].transcript;
-      setStatus({ type: 'info', message: `Heard: "${transcript}". Verifying...` });
+      setStatus({ type: 'info', message: `Analyzing sequence: "${transcript}"...` });
 
       try {
         const resp = await fetch('/api/ivr/verify', {
@@ -122,7 +130,7 @@ export default function Home() {
         const data = await resp.json();
         if (data.error) throw new Error(data.error);
         if (data.verified) {
-          setStatus({ type: 'success', message: '🎙️ Voice verified! Logged in successfully.' });
+          setStatus({ type: 'success', message: '🎙️ Acoustic signature confirmed. Access granted.' });
           setVoiceChallenge('');
         }
       } catch (error: any) {
@@ -132,7 +140,7 @@ export default function Home() {
 
     recognition.onerror = (event: any) => {
       setIsListening(false);
-      setStatus({ type: 'error', message: `Microphone error: ${event.error}` });
+      setStatus({ type: 'error', message: `Audio stream lost: ${event.error}` });
     };
 
     recognition.start();
@@ -141,7 +149,8 @@ export default function Home() {
   // --- 3. RECOVERY FLOWS ---
   const setupRecovery = async () => {
     if (!username) return setStatus({ type: 'error', message: 'Enter a username.' });
-    setStatus({ type: 'info', message: 'Splitting master key...' });
+    setStatus({ type: 'info', message: 'Executing Shamir\'s Secret Sharing...' });
+    setIsProcessing(true);
     try {
       const resp = await fetch('/api/recovery/setup', {
         method: 'POST',
@@ -152,17 +161,19 @@ export default function Home() {
       if (data.error) throw new Error(data.error);
       
       setDemoMasterKey(data.demo_master_key);
-      setStatus({ type: 'success', message: 'Recovery network established!' });
+      setStatus({ type: 'success', message: 'Cryptographic shards distributed to guardians.' });
     } catch (error: any) {
       setStatus({ type: 'error', message: error.message });
     }
+    setIsProcessing(false);
   };
 
   const reconstructKey = async () => {
     if (!username) return setStatus({ type: 'error', message: 'Enter a username.' });
-    if (!recoveryInput1 || !recoveryInput2) return setStatus({ type: 'error', message: 'Provide 2 shares.' });
+    if (!recoveryInput1 || !recoveryInput2) return setStatus({ type: 'error', message: 'Threshold not met. 2 shards required.' });
     
-    setStatus({ type: 'info', message: 'Reconstructing key...' });
+    setStatus({ type: 'info', message: 'Recombining cryptographic shards...' });
+    setIsProcessing(true);
     try {
       const resp = await fetch('/api/recovery/verify', {
         method: 'POST',
@@ -176,61 +187,116 @@ export default function Home() {
       if (data.error) throw new Error(data.error);
       
       setRecoveredKey(data.recoveredKey);
-      setStatus({ type: 'success', message: '✅ Threshold met! Master Key Recovered.' });
+      setStatus({ type: 'success', message: '✅ Threshold met. Master Key Reconstructed.' });
     } catch (error: any) {
       setStatus({ type: 'error', message: error.message });
     }
+    setIsProcessing(false);
   };
 
   return (
-    <main className="flex min-h-screen flex-col items-center py-12 px-6 bg-slate-900 overflow-y-auto">
-      <div className="w-full max-w-xl p-8 bg-slate-800 rounded-2xl shadow-xl border border-slate-700">
-        <h1 className="text-3xl font-bold mb-2 text-center text-white">AstraPass</h1>
-        <p className="text-slate-400 text-center mb-6 text-sm">Next-Generation Passwordless Authentication</p>
-
-        {/* TABS */}
-        <div className="flex bg-slate-900 rounded-lg p-1 mb-6">
-          <button onClick={() => { setActiveTab('passkey'); setStatus({type: '', message: ''}); }}
-            className={`flex-1 py-2 text-sm font-semibold rounded-md transition-all ${activeTab === 'passkey' ? 'bg-slate-700 text-white shadow' : 'text-slate-400'}`}>
-            FIDO2 Hardware
-          </button>
-          <button onClick={() => { setActiveTab('voice'); setStatus({type: '', message: ''}); }}
-            className={`flex-1 py-2 text-sm font-semibold rounded-md transition-all ${activeTab === 'voice' ? 'bg-slate-700 text-white shadow' : 'text-slate-400'}`}>
-            Basic Phone
-          </button>
-          <button onClick={() => { setActiveTab('recovery'); setStatus({type: '', message: ''}); }}
-            className={`flex-1 py-2 text-sm font-semibold rounded-md transition-all ${activeTab === 'recovery' ? 'bg-slate-700 text-white shadow' : 'text-slate-400'}`}>
-            Social Recovery
-          </button>
+    <main className="flex min-h-screen items-center justify-center bg-slate-950 px-4 py-12 font-sans selection:bg-blue-500/30">
+      <div className="w-full max-w-lg rounded-3xl border border-slate-800 bg-slate-900/80 p-8 shadow-2xl backdrop-blur-xl transition-all">
+        
+        {/* HEADER */}
+        <div className="mb-8 text-center relative">
+          <Link
+            href="/admin"
+            className="absolute right-0 top-0 text-[11px] font-bold uppercase tracking-wider text-slate-500 hover:text-blue-400 transition-colors border border-slate-800 rounded-lg px-2.5 py-1 bg-slate-950/60"
+          >
+            Admin 🛡️
+          </Link>
+          <h1 className="mb-2 mt-4 text-4xl font-extrabold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-emerald-400 drop-shadow-md">
+            AstraPass
+          </h1>
+          <p className="text-xs font-medium uppercase tracking-widest text-slate-400">
+            Zero-Knowledge Identity
+          </p>
         </div>
 
-        <div className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-slate-300 mb-1">Target Username</label>
-            <input type="text" value={username} onChange={(e) => setUsername(e.target.value)}
-              className="w-full px-4 py-3 bg-slate-900 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500" placeholder="e.g. mehul_sapra" />
+        {/* TABS */}
+        <div className="mb-8 flex rounded-xl bg-slate-950/50 p-1 shadow-inner ring-1 ring-slate-800/50">
+          {(['passkey', 'voice', 'recovery'] as const).map((tab) => (
+            <button
+              key={tab}
+              onClick={() => { setActiveTab(tab); setStatus({type: '', message: ''}); }}
+              className={`flex-1 rounded-lg py-2.5 text-xs font-bold uppercase tracking-wider transition-all duration-300 ${
+                activeTab === tab 
+                  ? 'bg-slate-800 text-white shadow-md ring-1 ring-slate-700' 
+                  : 'text-slate-500 hover:text-slate-300 hover:bg-slate-800/50'
+              }`}
+            >
+              {tab === 'passkey' ? 'FIDO2' : tab === 'voice' ? 'IVR' : 'Recovery'}
+            </button>
+          ))}
+        </div>
+
+        <div className="space-y-6">
+          {/* USERNAME INPUT */}
+          <div className="group">
+            <label className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-slate-400 group-focus-within:text-blue-400 transition-colors">
+              Subject Identifier
+            </label>
+            <input 
+              type="text" 
+              value={username} 
+              onChange={(e) => setUsername(e.target.value)}
+              className="w-full rounded-xl border border-slate-700 bg-slate-950/50 px-4 py-3.5 text-sm text-white shadow-inner transition-all placeholder:text-slate-600 focus:border-blue-500 focus:outline-none focus:ring-4 focus:ring-blue-500/10" 
+              placeholder="e.g. agent_007" 
+            />
           </div>
 
           {/* PASSKEY TAB */}
           {activeTab === 'passkey' && (
-            <div className="flex gap-4 mt-6">
-              <button onClick={handleRegister} className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-4 rounded-lg">Register Passkey</button>
-              <button onClick={handleLogin} className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-3 px-4 rounded-lg">Login</button>
+            <div className="flex gap-4 pt-2">
+              <button 
+                onClick={handleRegister} 
+                disabled={isProcessing}
+                className="flex-1 rounded-xl bg-gradient-to-br from-blue-600 to-blue-700 px-4 py-3.5 text-sm font-bold text-white shadow-lg shadow-blue-900/20 transition-all hover:scale-[1.02] hover:shadow-blue-900/40 active:scale-95 disabled:opacity-50 disabled:hover:scale-100"
+              >
+                Mint Passkey
+              </button>
+              <button 
+                onClick={handleLogin} 
+                disabled={isProcessing}
+                className="flex-1 rounded-xl bg-gradient-to-br from-emerald-600 to-emerald-700 px-4 py-3.5 text-sm font-bold text-white shadow-lg shadow-emerald-900/20 transition-all hover:scale-[1.02] hover:shadow-emerald-900/40 active:scale-95 disabled:opacity-50 disabled:hover:scale-100"
+              >
+                Authenticate
+              </button>
             </div>
           )}
 
           {/* VOICE TAB */}
           {activeTab === 'voice' && (
-            <div className="mt-6 flex flex-col gap-4">
+            <div className="flex flex-col gap-4 pt-2">
               {!voiceChallenge ? (
-                <button onClick={requestVoiceChallenge} className="w-full bg-purple-600 text-white font-semibold py-3 px-4 rounded-lg">Trigger IVR Call</button>
+                <button 
+                  onClick={requestVoiceChallenge} 
+                  disabled={isProcessing}
+                  className="w-full rounded-xl bg-gradient-to-br from-purple-600 to-purple-700 px-4 py-3.5 text-sm font-bold text-white shadow-lg shadow-purple-900/20 transition-all hover:scale-[1.02] hover:shadow-purple-900/40 active:scale-95 disabled:opacity-50"
+                >
+                  Generate Acoustic Cipher
+                </button>
               ) : (
-                <div className="bg-slate-900 border border-purple-500/50 p-4 rounded-lg text-center">
-                  <p className="text-2xl font-bold tracking-widest text-purple-400 mb-4">{voiceChallenge}</p>
-                  <button type="button" onClick={listenAndVerify} disabled={isListening}
-                    className={`w-full font-semibold py-3 px-4 rounded-lg text-white transition-all ${isListening ? 'bg-red-600 animate-pulse' : 'bg-emerald-600'}`}>
-                    {isListening ? '🎙️ Listening... Speak Now' : 'Click to Speak'}
-                  </button>
+                <div className="overflow-hidden rounded-xl border border-purple-500/30 bg-purple-950/20 shadow-inner">
+                  <div className="bg-purple-900/20 px-4 py-2 border-b border-purple-500/20">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-purple-400">Incoming Transmission</p>
+                  </div>
+                  <div className="p-6 text-center">
+                    <p className="mb-6 text-3xl font-black tracking-widest text-white drop-shadow-md">{voiceChallenge}</p>
+                    <button 
+                      type="button" 
+                      onClick={listenAndVerify} 
+                      disabled={isListening}
+                      className={`w-full rounded-xl px-4 py-3.5 text-sm font-bold text-white transition-all shadow-lg ${
+                        isListening 
+                          ? 'bg-red-600 animate-pulse shadow-red-900/50 cursor-not-allowed' 
+                          : 'bg-emerald-600 hover:bg-emerald-500 hover:scale-[1.02] active:scale-95 shadow-emerald-900/30'
+                      }`}
+                    >
+                      {isListening ? 'Intercepting Audio...' : 'Initialize Microphone'}
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
@@ -238,62 +304,73 @@ export default function Home() {
 
           {/* RECOVERY TAB */}
           {activeTab === 'recovery' && (
-            <div className="mt-6 flex flex-col gap-6">
-              {/* Setup Section */}
-              <div className="bg-slate-900 p-4 rounded-lg border border-slate-700">
-                <h3 className="text-white font-semibold mb-2">1. Split Key (3 Guardians)</h3>
-                <button onClick={setupRecovery} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded-lg mb-4">Generate & Split Key</button>
-                
+            <div className="flex flex-col gap-5 pt-2">
+              
+              <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-5 shadow-inner">
+                <h3 className="mb-3 text-xs font-bold uppercase tracking-wider text-blue-400">1. Distribute Shards</h3>
+                <button 
+                  onClick={setupRecovery} 
+                  disabled={isProcessing}
+                  className="mb-4 w-full rounded-lg bg-slate-700 px-4 py-2.5 text-sm font-bold text-white transition-all hover:bg-slate-600 active:scale-95 disabled:opacity-50"
+                >
+                  Split Key (3 Guardians)
+                </button>
                 {demoMasterKey && (
-                  <div className="text-xs font-mono break-all bg-black p-3 rounded text-green-400 mb-2 border border-green-900">
-                    Original Master: {demoMasterKey}
+                  <div className="rounded-md border border-green-900/50 bg-black/50 p-3 text-center shadow-inner">
+                    <p className="mb-1 text-[10px] font-bold uppercase text-slate-500">Master Cipher (Destroyed on Server)</p>
+                    <p className="break-all font-mono text-xs text-green-400">{demoMasterKey}</p>
                   </div>
                 )}
-                <p className="text-xs text-slate-400 mt-2">Check your Supabase database `recovery_shares` table to see the 3 split shares assigned to Alice, Bob, and Charlie!</p>
               </div>
 
-              {/* Reconstruct Section */}
-              <div className="bg-slate-900 p-4 rounded-lg border border-slate-700">
-                <h3 className="text-white font-semibold mb-2">2. Reconstruct (Need 2 of 3)</h3>
-                <p className="text-xs text-slate-400 mb-4">Paste any 2 share strings from your database here.</p>
-                
-                <input 
-                  type="text" 
-                  value={recoveryInput1} 
-                  onChange={(e) => setRecoveryInput1(e.target.value)}
-                  className="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-xs font-mono mb-2 focus:outline-none focus:border-blue-500" 
-                  placeholder="Paste Guardian 1 share here..." 
-                />
-                
-                <input 
-                  type="text" 
-                  value={recoveryInput2} 
-                  onChange={(e) => setRecoveryInput2(e.target.value)}
-                  className="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-xs font-mono mb-4 focus:outline-none focus:border-blue-500" 
-                  placeholder="Paste Guardian 2 share here..." 
-                />
-                
-                <button onClick={reconstructKey} className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-2 px-4 rounded-lg">
-                  Reconstruct Master Key
-                </button>
-
+              <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-5 shadow-inner">
+                <h3 className="mb-3 text-xs font-bold uppercase tracking-wider text-emerald-400">2. Combine Shards</h3>
+                <div className="space-y-3">
+                  <input 
+                    type="text" 
+                    value={recoveryInput1} 
+                    onChange={(e) => setRecoveryInput1(e.target.value)}
+                    className="w-full rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2.5 font-mono text-xs text-white placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500" 
+                    placeholder="Enter Shard Alpha..." 
+                  />
+                  <input 
+                    type="text" 
+                    value={recoveryInput2} 
+                    onChange={(e) => setRecoveryInput2(e.target.value)}
+                    className="w-full rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2.5 font-mono text-xs text-white placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500" 
+                    placeholder="Enter Shard Beta..." 
+                  />
+                  <button 
+                    onClick={reconstructKey} 
+                    disabled={isProcessing}
+                    className="w-full rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white transition-all hover:bg-emerald-500 active:scale-95 disabled:opacity-50"
+                  >
+                    Reconstruct Origin Key
+                  </button>
+                </div>
                 {recoveredKey && (
-                  <div className="mt-4 text-xs font-mono break-all bg-black p-3 rounded text-emerald-400 border border-emerald-900">
-                    Recovered Master: {recoveredKey}
+                  <div className="mt-4 rounded-md border border-emerald-900/50 bg-black/50 p-3 text-center shadow-inner">
+                    <p className="mb-1 text-[10px] font-bold uppercase text-slate-500">Reconstructed Cipher</p>
+                    <p className="break-all font-mono text-xs text-emerald-400">{recoveredKey}</p>
                   </div>
                 )}
               </div>
             </div>
           )}
 
-          {/* STATUS ALERTS */}
+          {/* STATUS CONSOLE */}
           {status.message && (
-            <div className={`mt-4 p-3 rounded-lg border text-sm text-center ${
-                status.type === 'success' ? 'bg-emerald-900/50 border-emerald-500/50 text-emerald-200' :
-                status.type === 'error' ? 'bg-red-900/50 border-red-500/50 text-red-200' :
-                'bg-blue-900/50 border-blue-500/50 text-blue-200'
+            <div className={`overflow-hidden rounded-xl border text-sm backdrop-blur-sm transition-all duration-300 ${
+                status.type === 'success' ? 'border-emerald-500/30 bg-emerald-950/40 text-emerald-200' :
+                status.type === 'error' ? 'border-red-500/30 bg-red-950/40 text-red-200' :
+                'border-blue-500/30 bg-blue-950/40 text-blue-200'
               }`}>
-              {status.message}
+              <div className="px-4 py-3 flex items-center justify-center gap-2">
+                <span className={`h-2 w-2 rounded-full animate-pulse ${
+                  status.type === 'success' ? 'bg-emerald-400' : status.type === 'error' ? 'bg-red-400' : 'bg-blue-400'
+                }`}></span>
+                <p className="font-medium text-center">{status.message}</p>
+              </div>
             </div>
           )}
         </div>
