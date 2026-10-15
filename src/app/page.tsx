@@ -35,7 +35,7 @@ export default function Home() {
     setTimeout(() => router.push('/dashboard'), 1500);
   };
 
-  // --- REGISTRATION: HIGH-RES ACOUSTIC EXTRACTION ---
+  // --- REGISTRATION: HIGH-RES BIOMETRIC EXTRACTION (DECIBELS) ---
   const recordBaselineVoiceprint = async () => {
     try {
       setIsProcessing(true);
@@ -45,21 +45,21 @@ export default function Home() {
       const source = audioContext.createMediaStreamSource(stream);
       const analyser = audioContext.createAnalyser();
       
-      // UPGRADE: High Resolution FFT (2048 bins instead of 32)
+      // UPGRADE: High Resolution FFT (2048 bins)
       analyser.fftSize = 2048; 
       source.connect(analyser);
 
-      const freqData = new Uint8Array(analyser.frequencyBinCount);
-      
-      // UPGRADE: Isolate only the unique human vocal formants (skip the first 20 bins of mic rumble)
-      const formantsLength = 280; 
+      // UPGRADE: Float32Array captures precise decibels (-100dB to 0dB) instead of low-res bytes
+      const freqData = new Float32Array(analyser.frequencyBinCount);
+      const formantsLength = 300; 
       let profileSum = new Float32Array(formantsLength);
       let samples = 0;
 
       const interval = setInterval(() => {
-        analyser.getByteFrequencyData(freqData);
+        analyser.getFloatFrequencyData(freqData);
         for (let i = 0; i < formantsLength; i++) {
-          profileSum[i] += freqData[i + 20]; // Shift by 20 to ignore hardware bias
+          // UPGRADE: Start at bin 3 (~70 Hz) to capture gender pitch differences
+          profileSum[i] += freqData[i + 3]; 
         }
         samples++;
       }, 50);
@@ -140,7 +140,7 @@ export default function Home() {
     setIsProcessing(false);
   };
 
-  // --- IVR LOGIN FLOW: HIGH-RES VERIFICATION ---
+  // --- IVR LOGIN FLOW: STRICT DECIBEL VERIFICATION ---
   const requestVoiceChallenge = async () => {
     if (!username) return setStatus({ type: 'error', message: 'Enter a username.' });
     setStatus({ type: 'info', message: 'Generating acoustic cipher...' });
@@ -171,19 +171,18 @@ export default function Home() {
       const source = audioContext.createMediaStreamSource(stream);
       const analyser = audioContext.createAnalyser();
       
-      // MUST MATCH ENROLLMENT: High Resolution
       analyser.fftSize = 2048; 
       source.connect(analyser);
 
-      const freqData = new Uint8Array(analyser.frequencyBinCount);
-      const formantsLength = 280; 
+      const freqData = new Float32Array(analyser.frequencyBinCount);
+      const formantsLength = 300; 
       let profileSum = new Float32Array(formantsLength);
       let samples = 0;
 
       const interval = setInterval(() => {
-        analyser.getByteFrequencyData(freqData);
+        analyser.getFloatFrequencyData(freqData);
         for (let i = 0; i < formantsLength; i++) {
-          profileSum[i] += freqData[i + 20];
+          profileSum[i] += freqData[i + 3];
         }
         samples++;
       }, 50);
@@ -364,7 +363,7 @@ export default function Home() {
               <div className="flex gap-4 pt-2">
                 {!isLoginMode ? (
                   <button onClick={handleRegister} disabled={isProcessing} className="w-full rounded-xl bg-gradient-to-br from-blue-600 to-blue-700 px-4 py-3.5 text-sm font-bold text-white shadow-lg shadow-blue-900/20 transition-all hover:scale-[1.02] hover:shadow-blue-900/40 active:scale-95 disabled:opacity-50 disabled:hover:scale-100">
-                    Register New Passkey
+                    Register New Account
                   </button>
                 ) : (
                   <button onClick={handleLogin} disabled={isProcessing} className="w-full rounded-xl bg-gradient-to-br from-emerald-600 to-emerald-700 px-4 py-3.5 text-sm font-bold text-white shadow-lg shadow-emerald-900/20 transition-all hover:scale-[1.02] hover:shadow-emerald-900/40 active:scale-95 disabled:opacity-50 disabled:hover:scale-100">
