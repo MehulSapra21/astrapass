@@ -35,7 +35,7 @@ export default function Home() {
     setTimeout(() => router.push('/dashboard'), 1500);
   };
 
-  // --- REGISTRATION: ACOUSTIC EXTRACTION ---
+  // --- REGISTRATION: HIGH-RES ACOUSTIC EXTRACTION ---
   const recordBaselineVoiceprint = async () => {
     try {
       setIsProcessing(true);
@@ -44,24 +44,31 @@ export default function Home() {
       const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
       const source = audioContext.createMediaStreamSource(stream);
       const analyser = audioContext.createAnalyser();
-      analyser.fftSize = 64;
+      
+      // UPGRADE: High Resolution FFT (2048 bins instead of 32)
+      analyser.fftSize = 2048; 
       source.connect(analyser);
 
       const freqData = new Uint8Array(analyser.frequencyBinCount);
-      let profileSum = new Float32Array(analyser.frequencyBinCount);
+      
+      // UPGRADE: Isolate only the unique human vocal formants (skip the first 20 bins of mic rumble)
+      const formantsLength = 280; 
+      let profileSum = new Float32Array(formantsLength);
       let samples = 0;
 
       const interval = setInterval(() => {
         analyser.getByteFrequencyData(freqData);
-        for (let i = 0; i < freqData.length; i++) profileSum[i] += freqData[i];
+        for (let i = 0; i < formantsLength; i++) {
+          profileSum[i] += freqData[i + 20]; // Shift by 20 to ignore hardware bias
+        }
         samples++;
-      }, 100);
+      }, 50);
 
       setTimeout(() => {
         clearInterval(interval);
         stream.getTracks().forEach(t => t.stop());
         setEnrolledVoiceprint(Array.from(profileSum).map(v => v / (samples || 1)));
-        setStatus({ type: 'success', message: '🎙️ Acoustic baseline locked successfully!' });
+        setStatus({ type: 'success', message: '🎙️ High-Res Acoustic baseline locked successfully!' });
         setIsProcessing(false);
       }, 3000);
     } catch (err: any) {
@@ -133,7 +140,7 @@ export default function Home() {
     setIsProcessing(false);
   };
 
-  // --- IVR LOGIN FLOW ---
+  // --- IVR LOGIN FLOW: HIGH-RES VERIFICATION ---
   const requestVoiceChallenge = async () => {
     if (!username) return setStatus({ type: 'error', message: 'Enter a username.' });
     setStatus({ type: 'info', message: 'Generating acoustic cipher...' });
@@ -163,18 +170,23 @@ export default function Home() {
       const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
       const source = audioContext.createMediaStreamSource(stream);
       const analyser = audioContext.createAnalyser();
-      analyser.fftSize = 64;
+      
+      // MUST MATCH ENROLLMENT: High Resolution
+      analyser.fftSize = 2048; 
       source.connect(analyser);
 
       const freqData = new Uint8Array(analyser.frequencyBinCount);
-      let profileSum = new Float32Array(analyser.frequencyBinCount);
+      const formantsLength = 280; 
+      let profileSum = new Float32Array(formantsLength);
       let samples = 0;
 
       const interval = setInterval(() => {
         analyser.getByteFrequencyData(freqData);
-        for (let i = 0; i < freqData.length; i++) profileSum[i] += freqData[i];
+        for (let i = 0; i < formantsLength; i++) {
+          profileSum[i] += freqData[i + 20];
+        }
         samples++;
-      }, 100);
+      }, 50);
 
       const recognition = new SpeechRecognition();
       recognition.lang = 'en-US';
@@ -182,7 +194,7 @@ export default function Home() {
       
       recognition.onstart = () => {
         setIsListening(true);
-        setStatus({ type: 'info', message: '🎤 Listening...' });
+        setStatus({ type: 'info', message: '🎤 Listening... Extracting vocal formants...' });
       };
       
       recognition.onresult = async (event: any) => {
