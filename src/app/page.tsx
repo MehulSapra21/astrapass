@@ -23,7 +23,7 @@ function extractPitchHz(timeDomain: Float32Array, sampleRate: number): number | 
     rms += timeDomain[i] * timeDomain[i];
   }
   rms = Math.sqrt(rms / timeDomain.length);
-  if (rms < 0.018) return null; // Ignore quiet frames / background room noise
+  if (rms < 0.012) return null; // Sensitive threshold to capture soft or sore-throat speech while rejecting room noise
 
   // Search human vocal cord fundamental range: 75 Hz to 320 Hz
   const minLag = Math.floor(sampleRate / 320);
@@ -49,8 +49,14 @@ function extractPitchHz(timeDomain: Float32Array, sampleRate: number): number | 
     }
   }
 
-  // Only accept frames with strong periodic vocal cord vibration (voiced vowels)
-  if (bestCorr < 0.72 || bestLag <= minLag || bestLag >= maxLag) return null;
+  // Accept frames with periodic vocal cord vibration (>= 0.60 accommodates slight vocal jitter/hoarseness from sore throat)
+  if (bestCorr < 0.60 || bestLag <= minLag || bestLag >= maxLag) return null;
+
+  // Check for subharmonic / octave error: prefer fundamental lag if correlation is strong
+  const halfLag = Math.round(bestLag / 2);
+  if (halfLag >= minLag && correlations[halfLag] >= 0.85 * bestCorr) {
+    bestLag = halfLag;
+  }
 
   // Parabolic interpolation for sub-Hz precision (0.1 Hz accuracy)
   const y1 = correlations[bestLag - 1];
@@ -74,8 +80,9 @@ function extractVocalTractFeatures(freqCancelDb: Float32Array, sampleRate: numbe
   const endBin = Math.min(freqCancelDb.length - 1, Math.floor(3800 / binHz));
 
   for (let i = startBin; i <= endBin; i++) {
-    // Convert dB to linear amplitude
-    const amp = Math.pow(10, freqCancelDb[i] / 20);
+    // Sanitize non-finite values from Web Audio FFT
+    const db = Number.isFinite(freqCancelDb[i]) ? Math.max(-100, freqCancelDb[i]) : -100;
+    const amp = Math.pow(10, db / 20);
     const freq = i * binHz;
     weightedFreqSum += freq * amp;
     totalEnergy += amp;
@@ -85,7 +92,7 @@ function extractVocalTractFeatures(freqCancelDb: Float32Array, sampleRate: numbe
 
   // 16 Logarithmically spaced Mel-Formant bands from 100 Hz to 3600 Hz
   const bandEdgesHz = [
-    100, 150, 210, 280, 360, 450, 560, 690, 
+    100, 150, 210, 280, 360, 450, 560, 690,
     840, 1020, 1230, 1480, 1780, 2140, 2570, 3080, 3600
   ];
   const bandLogEnergies: number[] = [];
@@ -96,7 +103,8 @@ function extractVocalTractFeatures(freqCancelDb: Float32Array, sampleRate: numbe
     let sumDb = 0;
     let count = 0;
     for (let i = bStart; i <= bEnd; i++) {
-      sumDb += freqCancelDb[i];
+      const db = Number.isFinite(freqCancelDb[i]) ? Math.max(-100, freqCancelDb[i]) : -100;
+      sumDb += db;
       count++;
     }
     bandLogEnergies.push(count > 0 ? sumDb / count : -100);
@@ -151,13 +159,13 @@ export default function Home() {
     try {
       setIsProcessing(true);
       setStatus({ type: 'info', message: '🎤 Speak continuously and clearly for 3.5 seconds...' });
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } 
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
       });
       const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
       const source = audioContext.createMediaStreamSource(stream);
       const analyser = audioContext.createAnalyser();
-      
+     
       analyser.fftSize = 4096; // High precision time & frequency buffer
       source.connect(analyser);
 
@@ -177,7 +185,7 @@ export default function Home() {
         if (pitchHz !== null) {
           analyser.getFloatFrequencyData(freqData);
           const { centroid, diffs } = extractVocalTractFeatures(freqData, audioContext.sampleRate, analyser.fftSize);
-          
+         
           pitchSamples.push(pitchHz);
           centroidSamples.push(centroid);
           for (let i = 0; i < 15; i++) diffsAccumulator[i] += diffs[i];
@@ -203,9 +211,9 @@ export default function Home() {
         };
 
         setEnrolledVoiceprint(profile);
-        setStatus({ 
-          type: 'success', 
-          message: `🎙️ Biometrics Locked! Fundamental Pitch: ${profile.f0.toFixed(1)} Hz | Resonance: ${profile.centroid.toFixed(0)} Hz` 
+        setStatus({
+          type: 'success',
+          message: `🎙️ Biometrics Locked! Fundamental Pitch: ${profile.f0.toFixed(1)} Hz | Resonance: ${profile.centroid.toFixed(0)} Hz`
         });
         setIsProcessing(false);
       }, 3500);
@@ -219,7 +227,7 @@ export default function Home() {
   const handleRegister = async () => {
     if (!username || !fullName || !email) return setStatus({ type: 'error', message: 'All text fields are required.' });
     if (!enrolledVoiceprint) return setStatus({ type: 'error', message: 'You must record your voiceprint first.' });
-    
+   
     setStatus({ type: 'info', message: 'Minting hardware passkey...' });
     setIsProcessing(true);
     try {
@@ -304,14 +312,14 @@ export default function Home() {
     if (!SpeechRecognition) return setStatus({ type: 'error', message: 'Use Chrome for Speech API.' });
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } 
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
       });
       const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
       const source = audioContext.createMediaStreamSource(stream);
       const analyser = audioContext.createAnalyser();
-      
-      analyser.fftSize = 4096; 
+     
+      analyser.fftSize = 4096;
       source.connect(analyser);
 
       const timeData = new Float32Array(analyser.fftSize);
@@ -329,7 +337,7 @@ export default function Home() {
         if (pitchHz !== null) {
           analyser.getFloatFrequencyData(freqData);
           const { centroid, diffs } = extractVocalTractFeatures(freqData, audioContext.sampleRate, analyser.fftSize);
-          
+         
           pitchSamples.push(pitchHz);
           centroidSamples.push(centroid);
           for (let i = 0; i < 15; i++) diffsAccumulator[i] += diffs[i];
@@ -340,18 +348,18 @@ export default function Home() {
       const recognition = new SpeechRecognition();
       recognition.lang = 'en-US';
       recognition.interimResults = false;
-      
+     
       recognition.onstart = () => {
         setIsListening(true);
         setStatus({ type: 'info', message: '🎤 Listening... Measuring vocal cord Hz & formants...' });
       };
-      
+     
       recognition.onresult = async (event: any) => {
         setIsListening(false);
         clearInterval(interval);
         stream.getTracks().forEach(t => t.stop());
         audioContext.close();
-        
+       
         if (voicedFrames < 3) {
           setStatus({ type: 'error', message: '❌ Audio too brief to extract Hz biometrics. Speak clearly.' });
           return;
@@ -382,7 +390,7 @@ export default function Home() {
           setStatus({ type: 'error', message: error.message });
         }
       };
-      
+     
       recognition.onerror = (event: any) => {
         setIsListening(false);
         clearInterval(interval);
@@ -390,7 +398,7 @@ export default function Home() {
         audioContext.close();
         setStatus({ type: 'error', message: `Audio stream lost: ${event.error}` });
       };
-      
+     
       recognition.start();
     } catch (e) {
       setStatus({ type: 'error', message: 'Mic permission denied.' });
@@ -442,7 +450,7 @@ export default function Home() {
   return (
     <main className="flex min-h-screen items-center justify-center bg-slate-950 px-4 py-12 font-sans selection:bg-blue-500/30">
       <div className="w-full max-w-lg rounded-3xl border border-slate-800 bg-slate-900/80 p-8 shadow-2xl backdrop-blur-xl transition-all">
-        
+       
         {/* HEADER */}
         <div className="mb-8 text-center relative">
           <Link href="/admin" className="absolute right-0 top-0 text-[11px] font-bold uppercase tracking-wider text-slate-500 hover:text-blue-400 transition-colors border border-slate-800 rounded-lg px-2.5 py-1 bg-slate-950/60">
@@ -470,18 +478,18 @@ export default function Home() {
         </div>
 
         <div className="space-y-4">
-          
+         
           {/* USERNAME INPUT */}
           <div className="group">
             <label className="mb-1 block text-xs font-bold uppercase tracking-wider text-slate-400 group-focus-within:text-blue-400 transition-colors">
               Subject Identifier (Username)
             </label>
-            <input 
-              type="text" 
-              value={username} 
+            <input
+              type="text"
+              value={username}
               onChange={e => setUsername(e.target.value)}
-              className="w-full rounded-xl border border-slate-700 bg-slate-950/50 px-4 py-3 text-sm text-white shadow-inner transition-all placeholder:text-slate-600 focus:border-blue-500 focus:outline-none focus:ring-4 focus:ring-blue-500/10" 
-              placeholder="e.g. agent_007" 
+              className="w-full rounded-xl border border-slate-700 bg-slate-950/50 px-4 py-3 text-sm text-white shadow-inner transition-all placeholder:text-slate-600 focus:border-blue-500 focus:outline-none focus:ring-4 focus:ring-blue-500/10"
+              placeholder="e.g. agent_007"
             />
           </div>
 
@@ -489,8 +497,8 @@ export default function Home() {
           {activeTab === 'passkey' && (
             <>
               <div className="flex items-center justify-end mb-2">
-                <button 
-                  onClick={() => setIsLoginMode(!isLoginMode)} 
+                <button
+                  onClick={() => setIsLoginMode(!isLoginMode)}
                   className="text-xs font-semibold text-blue-400 hover:text-blue-300 transition-colors underline underline-offset-4"
                 >
                   {isLoginMode ? 'Need to register an account?' : 'Already have an account? Log in.'}
@@ -509,15 +517,15 @@ export default function Home() {
                       <input type="email" value={email} onChange={e => setEmail(e.target.value)} className="w-full mt-1 rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-2 text-sm text-white focus:outline-none" placeholder="007@mi6.gov" />
                     </div>
                   </div>
-                  <button 
-                    onClick={recordBaselineVoiceprint} 
-                    disabled={isProcessing} 
+                  <button
+                    onClick={recordBaselineVoiceprint}
+                    disabled={isProcessing}
                     className={`w-full py-2.5 rounded-lg border border-purple-500/50 text-sm font-bold transition-all ${
                       enrolledVoiceprint ? 'bg-purple-900/50 text-purple-200' : 'bg-slate-900 text-purple-400 hover:bg-slate-800'
                     }`}
                   >
-                    {enrolledVoiceprint 
-                      ? `✅ Voice Locked (${enrolledVoiceprint.f0.toFixed(1)} Hz)` 
+                    {enrolledVoiceprint
+                      ? `✅ Voice Locked (${enrolledVoiceprint.f0.toFixed(1)} Hz)`
                       : '🎙️ Record Voiceprint (Required)'}
                   </button>
                 </div>
