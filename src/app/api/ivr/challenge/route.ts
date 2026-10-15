@@ -2,8 +2,8 @@ import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 
 // Word pools for randomized challenge-response pairs
-const ADJECTIVES = ['BLUE', 'GOLDEN', 'SILVER', 'RAPID', 'BRIGHT', 'SHADOW', 'IRON', 'SOLAR'];
-const NOUNS = ['TIGER', 'FALCON', 'RIVER', 'SHIELD', 'MOUNTAIN', 'BEACON', 'VALLEY', 'HARBOR'];
+const ADJECTIVES = ['SHADOW', 'SOLAR'];
+const NOUNS = ['RIVER','VALLEY'];
 
 export async function POST(request: Request) {
   try {
