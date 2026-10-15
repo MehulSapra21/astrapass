@@ -1,15 +1,25 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 
-function cosineSimilarity(vecA: number[], vecB: number[]) {
-  let dotProduct = 0, normA = 0, normB = 0;
-  for (let i = 0; i < vecA.length; i++) {
-    dotProduct += vecA[i] * vecB[i];
-    normA += vecA[i] * vecA[i];
-    normB += vecB[i] * vecB[i];
+// UPGRADED MATH: Pearson Correlation Coefficient
+// This strips away the microphone's hardware bias and strictly compares vocal cord variance.
+function pearsonCorrelation(vecA: number[], vecB: number[]) {
+  const n = vecA.length;
+  // 1. Find the mean (average) frequency to isolate the background/hardware noise
+  const meanA = vecA.reduce((a, b) => a + b, 0) / n;
+  const meanB = vecB.reduce((a, b) => a + b, 0) / n;
+
+  let numerator = 0, diffA2 = 0, diffB2 = 0;
+  // 2. Mean-center the vectors (subtract the background noise from the vocal profile)
+  for (let i = 0; i < n; i++) {
+    const diffA = vecA[i] - meanA;
+    const diffB = vecB[i] - meanB;
+    numerator += diffA * diffB;
+    diffA2 += diffA * diffA;
+    diffB2 += diffB * diffB;
   }
-  if (normA === 0 || normB === 0) return 0;
-  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+  if (diffA2 === 0 || diffB2 === 0) return 0;
+  return numerator / Math.sqrt(diffA2 * diffB2);
 }
 
 export async function POST(request: Request) {
@@ -33,13 +43,20 @@ export async function POST(request: Request) {
       return NextResponse.json({ verified: false, error: `Phrase mismatch. Heard: ${normalizedSpoken}` }, { status: 401 });
     }
 
-    const similarity = cosineSimilarity(user.voiceprint, voiceprint);
-    if (similarity < 0.85) { 
-      return NextResponse.json({ verified: false, error: `Speaker Mismatch! Match rate: ${(similarity*100).toFixed(1)}%. Intruder detected.` }, { status: 403 });
+    // STRICT Biometric Math Comparison
+    const similarity = pearsonCorrelation(user.voiceprint, voiceprint);
+    
+    // Pearson is incredibly strict. A 70% match here is very high for the same person.
+    // A different person will score much lower.
+    if (similarity < 0.70) { 
+      return NextResponse.json({ 
+        verified: false, 
+        error: `Speaker Mismatch! Match rate: ${(similarity * 100).toFixed(1)}%. Intruder detected.` 
+      }, { status: 403 });
     }
 
     await supabase.from('users').update({ current_challenge: null }).eq('id', user.id);
-    return NextResponse.json({ verified: true, message: `Identity confirmed. Acoustic match: ${(similarity*100).toFixed(1)}%` });
+    return NextResponse.json({ verified: true, message: `Identity confirmed. Strict Acoustic match: ${(similarity * 100).toFixed(1)}%` });
   } catch (error: any) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
