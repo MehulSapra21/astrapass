@@ -14,7 +14,8 @@
     "@supabase/supabase-js": "^2.117.3",
     "next": "16.4.1",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "secrets.js-grempe": "^2.0.0"
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "^4",
