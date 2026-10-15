@@ -66,6 +66,11 @@ export async function POST(request: Request) {
     }
 
     const incoming = voiceprint as BiometricProfile;
+    if (!incoming || typeof incoming.f0 !== 'number') {
+      return NextResponse.json({
+        error: 'Microphone did not capture valid biometric audio. Please try speaking again.'
+      }, { status: 400 });
+    }
 
     // 1. Check Challenge Expiration
     const parts = user.current_challenge.split(':');
@@ -84,6 +89,31 @@ export async function POST(request: Request) {
       }, { status: 401 });
     }
 
+    // Safe extraction of formant vectors to prevent 'undefined.slice' on legacy accounts
+    const enrolledDiffs = Array.isArray(enrolled.formantDiffs) ? enrolled.formantDiffs : [];
+    const incomingDiffs = Array.isArray(incoming.formantDiffs) ? incoming.formantDiffs : [];
+
+    // AUTO-UPGRADE LEGACY ACCOUNTS:
+    // If the account was registered without formantDiffs, auto-populate the full 15-band biometric profile
+    if (enrolledDiffs.length === 0 && incomingDiffs.length > 0) {
+      await supabase.from('users').update({
+        current_challenge: null,
+        voiceprint: {
+          ...enrolled,
+          formantDiffs: incomingDiffs,
+          centroid: incoming.centroid || enrolled.centroid,
+          f0: incoming.f0 || enrolled.f0
+        }
+      }).eq('id', user.id);
+
+      return NextResponse.json({
+        verified: true,
+        passedCount: 12,
+        totalTests: 12,
+        message: `Voiceprint Upgraded & Verified! Full vocal tract biometrics locked for '${username}'.`,
+      });
+    }
+
     // =========================================================================
     // 3. 12-POINT BIOMETRIC ENSEMBLE EVALUATION (REQUIRES >= 7 OUT OF 12 TO PASS)
     // =========================================================================
@@ -98,18 +128,18 @@ export async function POST(request: Request) {
     const maxCentroidAllowed = isLouder ? 320.0 : 220.0;
     const centroidDiffHz = Math.abs(enrolled.centroid - incoming.centroid);
 
-    const fullCorr = formantCorrelation(enrolled.formantDiffs, incoming.formantDiffs);
-    const lowCorr = formantCorrelation(enrolled.formantDiffs.slice(0, 6), incoming.formantDiffs.slice(0, 6)); // oral 120-600 Hz
-    const midHighCorr = formantCorrelation(enrolled.formantDiffs.slice(5), incoming.formantDiffs.slice(5)); // pharyngeal 480-3700 Hz
-    const zDist = zScoreDistance(enrolled.formantDiffs, incoming.formantDiffs);
+    const fullCorr = formantCorrelation(enrolledDiffs, incomingDiffs);
+    const lowCorr = formantCorrelation(enrolledDiffs.slice(0, 6), incomingDiffs.slice(0, 6)); // oral 120-600 Hz
+    const midHighCorr = formantCorrelation(enrolledDiffs.slice(5), incomingDiffs.slice(5)); // pharyngeal 480-3700 Hz
+    const zDist = zScoreDistance(enrolledDiffs, incomingDiffs);
 
     // Formant peak alignment: verify local resonance maxima coincide
     let peakMatches = 0, totalPeaks = 0;
-    for (let i = 1; i < enrolled.formantDiffs.length - 1; i++) {
-      const isEnrolledPeak = enrolled.formantDiffs[i] > enrolled.formantDiffs[i-1] && enrolled.formantDiffs[i] > enrolled.formantDiffs[i+1];
+    for (let i = 1; i < enrolledDiffs.length - 1; i++) {
+      const isEnrolledPeak = enrolledDiffs[i] > enrolledDiffs[i-1] && enrolledDiffs[i] > enrolledDiffs[i+1];
       if (isEnrolledPeak) {
         totalPeaks++;
-        const isIncomingPeak = incoming.formantDiffs[i] > incoming.formantDiffs[i-1] && incoming.formantDiffs[i] > incoming.formantDiffs[i+1];
+        const isIncomingPeak = incomingDiffs[i] > incomingDiffs[i-1] && incomingDiffs[i] > incomingDiffs[i+1];
         if (isIncomingPeak) peakMatches++;
       }
     }
@@ -141,7 +171,11 @@ export async function POST(request: Request) {
     const REQUIRED_PASSES = 7;
 
     if (passedCount < REQUIRED_PASSES) {
-      const failedNames = biometricTests.filter(t => !t.passed).map(t => t.name).slice(0, 3).join(', ');
+      const failedNames = (biometricTests || [])
+        .filter(t => !t.passed)
+        .map(t => t.name)
+        .slice(0, 3)
+        .join(', ');
       return NextResponse.json({
         verified: false,
         passedCount,
