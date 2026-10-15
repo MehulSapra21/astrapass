@@ -14,10 +14,11 @@ export default function Home() {
   // Registration vs Login Mode
   const [isLoginMode, setIsLoginMode] = useState(false);
 
-  // User Details
+  // User Details & Voiceprint State
   const [username, setUsername] = useState('');
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
+  const [enrolledVoiceprint, setEnrolledVoiceprint] = useState<number[] | null>(null);
 
   // --- VOICE & RECOVERY STATES ---
   const [voiceChallenge, setVoiceChallenge] = useState('');
@@ -31,18 +32,56 @@ export default function Home() {
   const onSuccessRedirect = (user: string, message: string) => {
     setStatus({ type: 'success', message });
     localStorage.setItem('astrapass_user', user);
-    setTimeout(() => router.push('/dashboard'), 1000);
+    setTimeout(() => router.push('/dashboard'), 1500);
   };
 
+  // --- REGISTRATION: ACOUSTIC EXTRACTION ---
+  const recordBaselineVoiceprint = async () => {
+    try {
+      setIsProcessing(true);
+      setStatus({ type: 'info', message: '🎤 Speak your full name for 3 seconds to lock in biometrics...' });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const source = audioContext.createMediaStreamSource(stream);
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 64;
+      source.connect(analyser);
+
+      const freqData = new Uint8Array(analyser.frequencyBinCount);
+      let profileSum = new Float32Array(analyser.frequencyBinCount);
+      let samples = 0;
+
+      const interval = setInterval(() => {
+        analyser.getByteFrequencyData(freqData);
+        for (let i = 0; i < freqData.length; i++) profileSum[i] += freqData[i];
+        samples++;
+      }, 100);
+
+      setTimeout(() => {
+        clearInterval(interval);
+        stream.getTracks().forEach(t => t.stop());
+        setEnrolledVoiceprint(Array.from(profileSum).map(v => v / (samples || 1)));
+        setStatus({ type: 'success', message: '🎙️ Acoustic baseline locked successfully!' });
+        setIsProcessing(false);
+      }, 3000);
+    } catch (err: any) {
+      setStatus({ type: 'error', message: 'Microphone permission denied.' });
+      setIsProcessing(false);
+    }
+  };
+
+  // --- PASSKEY FLOWS ---
   const handleRegister = async () => {
-    if (!username || !fullName || !email) return setStatus({ type: 'error', message: 'All fields are required for registration.' });
-    setStatus({ type: 'info', message: 'Generating hardware passkey...' });
+    if (!username || !fullName || !email) return setStatus({ type: 'error', message: 'All text fields are required.' });
+    if (!enrolledVoiceprint) return setStatus({ type: 'error', message: 'You must record your voiceprint first.' });
+    
+    setStatus({ type: 'info', message: 'Minting hardware passkey...' });
     setIsProcessing(true);
     try {
       const resp = await fetch('/api/webauthn/register/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, fullName, email }),
+        body: JSON.stringify({ username, fullName, email, voiceprint: enrolledVoiceprint }),
       });
       const optionsJSON = await resp.json();
       if (optionsJSON.error) throw new Error(optionsJSON.error);
@@ -57,7 +96,7 @@ export default function Home() {
       const verifyJSON = await verifyResp.json();
 
       if (verifyJSON.error) throw new Error(verifyJSON.error);
-      if (verifyJSON.verified) onSuccessRedirect(username, '✅ Hardware Passkey secured! Redirecting...');
+      if (verifyJSON.verified) onSuccessRedirect(username, '✅ Passkey & Voice secured! Redirecting...');
     } catch (error: any) {
       setStatus({ type: 'error', message: error.message });
     }
@@ -87,16 +126,17 @@ export default function Home() {
       const verifyJSON = await verifyResp.json();
 
       if (verifyJSON.error) throw new Error(verifyJSON.error);
-      if (verifyJSON.verified) onSuccessRedirect(username, '🔓 Identity Verified. Welcome back.');
+      if (verifyJSON.verified) onSuccessRedirect(username, '🔓 FIDO2 Verified. Redirecting...');
     } catch (error: any) {
       setStatus({ type: 'error', message: error.message });
     }
     setIsProcessing(false);
   };
 
+  // --- IVR LOGIN FLOW ---
   const requestVoiceChallenge = async () => {
     if (!username) return setStatus({ type: 'error', message: 'Enter a username.' });
-    setStatus({ type: 'info', message: 'Establishing secure acoustic channel...' });
+    setStatus({ type: 'info', message: 'Generating acoustic cipher...' });
     setIsProcessing(true);
     try {
       const resp = await fetch('/api/ivr/challenge', {
@@ -107,55 +147,88 @@ export default function Home() {
       const data = await resp.json();
       if (data.error) throw new Error(data.error);
       setVoiceChallenge(data.challengePhrase);
-      setStatus({ type: 'info', message: 'Channel open. Speak the phrase below.' });
+      setStatus({ type: 'info', message: 'Speak the cipher phrase below.' });
     } catch (error: any) {
       setStatus({ type: 'error', message: error.message });
     }
     setIsProcessing(false);
   };
 
-  const listenAndVerify = () => {
+  const listenAndVerify = async () => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) return setStatus({ type: 'error', message: 'Speech API not supported in this browser.' });
+    if (!SpeechRecognition) return setStatus({ type: 'error', message: 'Use Chrome for Speech API.' });
 
-    const recognition = new SpeechRecognition();
-    recognition.lang = 'en-US';
-    recognition.interimResults = false;
-    recognition.onstart = () => {
-      setIsListening(true);
-      setStatus({ type: 'info', message: '🎤 Microphone hot. Verifying acoustics...' });
-    };
-    recognition.onresult = async (event: any) => {
-      setIsListening(false);
-      const transcript = event.results[0][0].transcript;
-      setStatus({ type: 'info', message: `Analyzing sequence: "${transcript}"...` });
-      try {
-        const resp = await fetch('/api/ivr/verify', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username, transcript }),
-        });
-        const data = await resp.json();
-        if (data.error) throw new Error(data.error);
-        if (data.verified) {
-          setVoiceChallenge('');
-          onSuccessRedirect(username, '🎙️ Acoustic signature confirmed. Redirecting...');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const source = audioContext.createMediaStreamSource(stream);
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 64;
+      source.connect(analyser);
+
+      const freqData = new Uint8Array(analyser.frequencyBinCount);
+      let profileSum = new Float32Array(analyser.frequencyBinCount);
+      let samples = 0;
+
+      const interval = setInterval(() => {
+        analyser.getByteFrequencyData(freqData);
+        for (let i = 0; i < freqData.length; i++) profileSum[i] += freqData[i];
+        samples++;
+      }, 100);
+
+      const recognition = new SpeechRecognition();
+      recognition.lang = 'en-US';
+      recognition.interimResults = false;
+      
+      recognition.onstart = () => {
+        setIsListening(true);
+        setStatus({ type: 'info', message: '🎤 Listening...' });
+      };
+      
+      recognition.onresult = async (event: any) => {
+        setIsListening(false);
+        clearInterval(interval);
+        stream.getTracks().forEach(t => t.stop());
+        
+        const finalVoiceprint = Array.from(profileSum).map(v => v / (samples || 1));
+        const transcript = event.results[0][0].transcript;
+        setStatus({ type: 'info', message: `Analyzing: "${transcript}"...` });
+
+        try {
+          const resp = await fetch('/api/ivr/verify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, transcript, voiceprint: finalVoiceprint }),
+          });
+          const data = await resp.json();
+          if (data.error) throw new Error(data.error);
+          if (data.verified) {
+            setVoiceChallenge('');
+            onSuccessRedirect(username, data.message);
+          }
+        } catch (error: any) {
+          setStatus({ type: 'error', message: error.message });
         }
-      } catch (error: any) {
-        setStatus({ type: 'error', message: error.message });
-      }
-    };
-    recognition.onerror = (event: any) => {
-      setIsListening(false);
-      setStatus({ type: 'error', message: `Audio stream lost: ${event.error}` });
-    };
-    recognition.start();
+      };
+      
+      recognition.onerror = (event: any) => {
+        setIsListening(false);
+        clearInterval(interval);
+        stream.getTracks().forEach(t => t.stop());
+        setStatus({ type: 'error', message: `Audio stream lost: ${event.error}` });
+      };
+      
+      recognition.start();
+    } catch (e) {
+      setStatus({ type: 'error', message: 'Mic permission denied.' });
+    }
   };
 
+  // --- RECOVERY FLOW ---
   const setupRecovery = async () => {
     if (!username) return setStatus({ type: 'error', message: 'Enter a username.' });
-    setStatus({ type: 'info', message: 'Executing Shamir\'s Secret Sharing...' });
     setIsProcessing(true);
+    setStatus({ type: 'info', message: 'Executing Shamir\'s Secret Sharing...' });
     try {
       const resp = await fetch('/api/recovery/setup', {
         method: 'POST',
@@ -165,7 +238,7 @@ export default function Home() {
       const data = await resp.json();
       if (data.error) throw new Error(data.error);
       setDemoMasterKey(data.demo_master_key);
-      setStatus({ type: 'success', message: 'Cryptographic shards distributed to guardians.' });
+      setStatus({ type: 'success', message: 'Shards distributed.' });
     } catch (error: any) {
       setStatus({ type: 'error', message: error.message });
     }
@@ -174,9 +247,9 @@ export default function Home() {
 
   const reconstructKey = async () => {
     if (!username) return setStatus({ type: 'error', message: 'Enter a username.' });
-    if (!recoveryInput1 || !recoveryInput2) return setStatus({ type: 'error', message: 'Threshold not met. 2 shards required.' });
-    setStatus({ type: 'info', message: 'Recombining cryptographic shards...' });
+    if (!recoveryInput1 || !recoveryInput2) return setStatus({ type: 'error', message: 'Need 2 shards.' });
     setIsProcessing(true);
+    setStatus({ type: 'info', message: 'Recombining cryptographic shards...' });
     try {
       const resp = await fetch('/api/recovery/verify', {
         method: 'POST',
@@ -186,7 +259,7 @@ export default function Home() {
       const data = await resp.json();
       if (data.error) throw new Error(data.error);
       setRecoveredKey(data.recoveredKey);
-      setStatus({ type: 'success', message: '✅ Threshold met. Master Key Reconstructed.' });
+      setStatus({ type: 'success', message: '✅ Key Reconstructed.' });
     } catch (error: any) {
       setStatus({ type: 'error', message: error.message });
     }
@@ -210,10 +283,10 @@ export default function Home() {
 
         {/* TABS */}
         <div className="mb-8 flex rounded-xl bg-slate-950/50 p-1 shadow-inner ring-1 ring-slate-800/50">
-          {(['passkey', 'voice', 'recovery'] as const).map((tab) => (
+          {(['passkey', 'voice', 'recovery'] as const).map(tab => (
             <button
               key={tab}
-              onClick={() => { setActiveTab(tab); setStatus({type: '', message: ''}); }}
+              onClick={() => { setActiveTab(tab); setStatus({type:'', message:''}); }}
               className={`flex-1 rounded-lg py-2.5 text-xs font-bold uppercase tracking-wider transition-all duration-300 ${
                 activeTab === tab ? 'bg-slate-800 text-white shadow-md ring-1 ring-slate-700' : 'text-slate-500 hover:text-slate-300 hover:bg-slate-800/50'
               }`}
@@ -233,7 +306,7 @@ export default function Home() {
             <input 
               type="text" 
               value={username} 
-              onChange={(e) => setUsername(e.target.value)}
+              onChange={e => setUsername(e.target.value)}
               className="w-full rounded-xl border border-slate-700 bg-slate-950/50 px-4 py-3 text-sm text-white shadow-inner transition-all placeholder:text-slate-600 focus:border-blue-500 focus:outline-none focus:ring-4 focus:ring-blue-500/10" 
               placeholder="e.g. agent_007" 
             />
@@ -253,15 +326,26 @@ export default function Home() {
               </div>
 
               {!isLoginMode && (
-                <div className="grid grid-cols-2 gap-4 pb-2">
-                  <div className="group">
-                    <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400 group-focus-within:text-blue-400 transition-colors">Full Name</label>
-                    <input type="text" value={fullName} onChange={(e) => setFullName(e.target.value)} className="w-full rounded-xl border border-slate-700 bg-slate-950/50 px-4 py-3 text-sm text-white shadow-inner placeholder:text-slate-600 focus:border-blue-500 focus:outline-none" placeholder="James Bond" />
+                <div className="space-y-3 pb-2">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="text-[10px] font-bold uppercase text-slate-400">Full Name</label>
+                      <input type="text" value={fullName} onChange={e => setFullName(e.target.value)} className="w-full mt-1 rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-2 text-sm text-white focus:outline-none" placeholder="James Bond" />
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-bold uppercase text-slate-400">Email Address</label>
+                      <input type="email" value={email} onChange={e => setEmail(e.target.value)} className="w-full mt-1 rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-2 text-sm text-white focus:outline-none" placeholder="007@mi6.gov" />
+                    </div>
                   </div>
-                  <div className="group">
-                    <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400 group-focus-within:text-blue-400 transition-colors">Email Address</label>
-                    <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} className="w-full rounded-xl border border-slate-700 bg-slate-950/50 px-4 py-3 text-sm text-white shadow-inner placeholder:text-slate-600 focus:border-blue-500 focus:outline-none" placeholder="007@mi6.gov" />
-                  </div>
+                  <button 
+                    onClick={recordBaselineVoiceprint} 
+                    disabled={isProcessing} 
+                    className={`w-full py-2.5 rounded-lg border border-purple-500/50 text-sm font-bold transition-all ${
+                      enrolledVoiceprint ? 'bg-purple-900/50 text-purple-200' : 'bg-slate-900 text-purple-400 hover:bg-slate-800'
+                    }`}
+                  >
+                    {enrolledVoiceprint ? '✅ Voiceprint Captured' : '🎙️ Record Voiceprint (Required)'}
+                  </button>
                 </div>
               )}
 
@@ -305,7 +389,9 @@ export default function Home() {
             <div className="flex flex-col gap-5 pt-2">
               <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-5 shadow-inner">
                 <h3 className="mb-3 text-xs font-bold uppercase tracking-wider text-blue-400">1. Distribute Shards</h3>
-                <button onClick={setupRecovery} disabled={isProcessing} className="mb-4 w-full rounded-lg bg-slate-700 px-4 py-2.5 text-sm font-bold text-white transition-all hover:bg-slate-600 active:scale-95 disabled:opacity-50">Split Key (3 Guardians)</button>
+                <button onClick={setupRecovery} disabled={isProcessing} className="mb-4 w-full rounded-lg bg-slate-700 px-4 py-2.5 text-sm font-bold text-white transition-all hover:bg-slate-600 active:scale-95 disabled:opacity-50">
+                  Split Key (3 Guardians)
+                </button>
                 {demoMasterKey && (
                   <div className="rounded-md border border-green-900/50 bg-black/50 p-3 text-center shadow-inner">
                     <p className="mb-1 text-[10px] font-bold uppercase text-slate-500">Master Cipher (Destroyed on Server)</p>
@@ -317,9 +403,11 @@ export default function Home() {
               <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-5 shadow-inner">
                 <h3 className="mb-3 text-xs font-bold uppercase tracking-wider text-emerald-400">2. Combine Shards</h3>
                 <div className="space-y-3">
-                  <input type="text" value={recoveryInput1} onChange={(e) => setRecoveryInput1(e.target.value)} className="w-full rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2.5 font-mono text-xs text-white placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500" placeholder="Enter Shard Alpha..." />
-                  <input type="text" value={recoveryInput2} onChange={(e) => setRecoveryInput2(e.target.value)} className="w-full rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2.5 font-mono text-xs text-white placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500" placeholder="Enter Shard Beta..." />
-                  <button onClick={reconstructKey} disabled={isProcessing} className="w-full rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white transition-all hover:bg-emerald-500 active:scale-95 disabled:opacity-50">Reconstruct Origin Key</button>
+                  <input type="text" value={recoveryInput1} onChange={e => setRecoveryInput1(e.target.value)} className="w-full rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2.5 font-mono text-xs text-white placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500" placeholder="Enter Shard Alpha..." />
+                  <input type="text" value={recoveryInput2} onChange={e => setRecoveryInput2(e.target.value)} className="w-full rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2.5 font-mono text-xs text-white placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500" placeholder="Enter Shard Beta..." />
+                  <button onClick={reconstructKey} disabled={isProcessing} className="w-full rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white transition-all hover:bg-emerald-500 active:scale-95 disabled:opacity-50">
+                    Reconstruct Origin Key
+                  </button>
                 </div>
                 {recoveredKey && (
                   <div className="mt-4 rounded-md border border-emerald-900/50 bg-black/50 p-3 text-center shadow-inner">
@@ -333,9 +421,15 @@ export default function Home() {
 
           {/* STATUS CONSOLE */}
           {status.message && (
-            <div className={`overflow-hidden rounded-xl border text-sm backdrop-blur-sm transition-all duration-300 ${status.type === 'success' ? 'border-emerald-500/30 bg-emerald-950/40 text-emerald-200' : status.type === 'error' ? 'border-red-500/30 bg-red-950/40 text-red-200' : 'border-blue-500/30 bg-blue-950/40 text-blue-200'}`}>
+            <div className={`overflow-hidden rounded-xl border text-sm backdrop-blur-sm transition-all duration-300 ${
+                status.type === 'success' ? 'border-emerald-500/30 bg-emerald-950/40 text-emerald-200' :
+                status.type === 'error' ? 'border-red-500/30 bg-red-950/40 text-red-200' :
+                'border-blue-500/30 bg-blue-950/40 text-blue-200'
+              }`}>
               <div className="px-4 py-3 flex items-center justify-center gap-2">
-                <span className={`h-2 w-2 rounded-full animate-pulse ${status.type === 'success' ? 'bg-emerald-400' : status.type === 'error' ? 'bg-red-400' : 'bg-blue-400'}`}></span>
+                <span className={`h-2 w-2 rounded-full animate-pulse ${
+                  status.type === 'success' ? 'bg-emerald-400' : status.type === 'error' ? 'bg-red-400' : 'bg-blue-400'
+                }`}></span>
                 <p className="font-medium text-center">{status.message}</p>
               </div>
             </div>
