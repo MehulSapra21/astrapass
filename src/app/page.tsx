@@ -5,22 +5,133 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { startRegistration, startAuthentication } from '@simplewebauthn/browser';
 
+interface BiometricProfile {
+  f0: number;
+  centroid: number;
+  formantDiffs: number[];
+}
+
+// ============================================================================
+// BIOMETRIC DSP ENGINE: SUB-HERTZ AUTOCORRELATION & FORMANT DIFFERENTIALS
+// ============================================================================
+
+// 1. Extracts exact vocal cord pitch in Hz (0.1 Hz precision) using Autocorrelation
+function extractPitchHz(timeDomain: Float32Array, sampleRate: number): number | null {
+  // Voice Activity Detection (VAD): Calculate RMS volume to ignore silence/breath
+  let rms = 0;
+  for (let i = 0; i < timeDomain.length; i++) {
+    rms += timeDomain[i] * timeDomain[i];
+  }
+  rms = Math.sqrt(rms / timeDomain.length);
+  if (rms < 0.018) return null; // Ignore quiet frames / background room noise
+
+  // Search human vocal cord fundamental range: 75 Hz to 320 Hz
+  const minLag = Math.floor(sampleRate / 320);
+  const maxLag = Math.floor(sampleRate / 75);
+
+  let bestCorr = 0;
+  let bestLag = -1;
+  const correlations = new Float32Array(maxLag + 2);
+
+  for (let lag = minLag; lag <= maxLag; lag++) {
+    let sum = 0, normA = 0, normB = 0;
+    for (let i = 0; i < timeDomain.length - lag; i++) {
+      sum += timeDomain[i] * timeDomain[i + lag];
+      normA += timeDomain[i] * timeDomain[i];
+      normB += timeDomain[i + lag] * timeDomain[i + lag];
+    }
+    const corr = sum / Math.sqrt((normA * normB) || 1);
+    correlations[lag] = corr;
+
+    if (corr > bestCorr) {
+      bestCorr = corr;
+      bestLag = lag;
+    }
+  }
+
+  // Only accept frames with strong periodic vocal cord vibration (voiced vowels)
+  if (bestCorr < 0.72 || bestLag <= minLag || bestLag >= maxLag) return null;
+
+  // Parabolic interpolation for sub-Hz precision (0.1 Hz accuracy)
+  const y1 = correlations[bestLag - 1];
+  const y2 = correlations[bestLag];
+  const y3 = correlations[bestLag + 1];
+  const denom = y1 - 2 * y2 + y3;
+  const shift = denom !== 0 ? (0.5 * (y1 - y3)) / denom : 0;
+
+  const exactLag = bestLag + (Math.abs(shift) < 1 ? shift : 0);
+  return sampleRate / exactLag;
+}
+
+// 2. Extracts Spectral Centroid (Hz) and Slope-Removed Formant Bands
+function extractVocalTractFeatures(freqCancelDb: Float32Array, sampleRate: number, fftSize: number) {
+  const binHz = sampleRate / fftSize;
+  let weightedFreqSum = 0;
+  let totalEnergy = 0;
+
+  // Measure between 100 Hz and 3800 Hz (Core vocal tract formant zone)
+  const startBin = Math.floor(100 / binHz);
+  const endBin = Math.min(freqCancelDb.length - 1, Math.floor(3800 / binHz));
+
+  for (let i = startBin; i <= endBin; i++) {
+    // Convert dB to linear amplitude
+    const amp = Math.pow(10, freqCancelDb[i] / 20);
+    const freq = i * binHz;
+    weightedFreqSum += freq * amp;
+    totalEnergy += amp;
+  }
+
+  const centroid = totalEnergy > 0 ? weightedFreqSum / totalEnergy : 0;
+
+  // 16 Logarithmically spaced Mel-Formant bands from 100 Hz to 3600 Hz
+  const bandEdgesHz = [
+    100, 150, 210, 280, 360, 450, 560, 690, 
+    840, 1020, 1230, 1480, 1780, 2140, 2570, 3080, 3600
+  ];
+  const bandLogEnergies: number[] = [];
+
+  for (let b = 0; b < 16; b++) {
+    const bStart = Math.max(1, Math.floor(bandEdgesHz[b] / binHz));
+    const bEnd = Math.min(freqCancelDb.length - 1, Math.ceil(bandEdgesHz[b + 1] / binHz));
+    let sumDb = 0;
+    let count = 0;
+    for (let i = bStart; i <= bEnd; i++) {
+      sumDb += freqCancelDb[i];
+      count++;
+    }
+    bandLogEnergies.push(count > 0 ? sumDb / count : -100);
+  }
+
+  // First-order differential (Band[i+1] - Band[i]) to DESTROY global spectral tilt / mic bias!
+  const diffs: number[] = [];
+  for (let i = 0; i < bandLogEnergies.length - 1; i++) {
+    diffs.push(bandLogEnergies[i + 1] - bandLogEnergies[i]);
+  }
+
+  return { centroid, diffs };
+}
+
+// Helper: Median calculation (immune to single-frame coughs/glitches)
+function getMedian(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
 export default function Home() {
   const router = useRouter();
   const [status, setStatus] = useState({ type: '', message: '' });
   const [activeTab, setActiveTab] = useState<'passkey' | 'voice' | 'recovery'>('passkey');
   const [isProcessing, setIsProcessing] = useState(false);
-  
-  // Registration vs Login Mode
   const [isLoginMode, setIsLoginMode] = useState(false);
 
   // User Details & Voiceprint State
   const [username, setUsername] = useState('');
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
-  const [enrolledVoiceprint, setEnrolledVoiceprint] = useState<number[] | null>(null);
+  const [enrolledVoiceprint, setEnrolledVoiceprint] = useState<BiometricProfile | null>(null);
 
-  // --- VOICE & RECOVERY STATES ---
+  // Voice & Recovery States
   const [voiceChallenge, setVoiceChallenge] = useState('');
   const [isListening, setIsListening] = useState(false);
   const [guardians] = useState(['Alice', 'Bob', 'Charlie']);
@@ -32,45 +143,72 @@ export default function Home() {
   const onSuccessRedirect = (user: string, message: string) => {
     setStatus({ type: 'success', message });
     localStorage.setItem('astrapass_user', user);
-    setTimeout(() => router.push('/dashboard'), 1500);
+    setTimeout(() => router.push('/dashboard'), 1800);
   };
 
-  // --- REGISTRATION: HIGH-RES BIOMETRIC EXTRACTION (DECIBELS) ---
+  // --- REGISTRATION: SUB-HERTZ BIOMETRIC EXTRACTION ---
   const recordBaselineVoiceprint = async () => {
     try {
       setIsProcessing(true);
-      setStatus({ type: 'info', message: '🎤 Speak your full name for 3 seconds to lock in biometrics...' });
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      setStatus({ type: 'info', message: '🎤 Speak continuously and clearly for 3.5 seconds...' });
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } 
+      });
       const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
       const source = audioContext.createMediaStreamSource(stream);
       const analyser = audioContext.createAnalyser();
       
-      // UPGRADE: High Resolution FFT (2048 bins)
-      analyser.fftSize = 2048; 
+      analyser.fftSize = 4096; // High precision time & frequency buffer
       source.connect(analyser);
 
-      // UPGRADE: Float32Array captures precise decibels (-100dB to 0dB) instead of low-res bytes
+      const timeData = new Float32Array(analyser.fftSize);
       const freqData = new Float32Array(analyser.frequencyBinCount);
-      const formantsLength = 300; 
-      let profileSum = new Float32Array(formantsLength);
-      let samples = 0;
+
+      const pitchSamples: number[] = [];
+      const centroidSamples: number[] = [];
+      const diffsAccumulator = new Float32Array(15);
+      let voicedFrames = 0;
 
       const interval = setInterval(() => {
-        analyser.getFloatFrequencyData(freqData);
-        for (let i = 0; i < formantsLength; i++) {
-          // UPGRADE: Start at bin 3 (~70 Hz) to capture gender pitch differences
-          profileSum[i] += freqData[i + 3]; 
+        analyser.getFloatTimeDomainData(timeData);
+        const pitchHz = extractPitchHz(timeData, audioContext.sampleRate);
+
+        // ONLY sample frames where vocal cords are actively vibrating!
+        if (pitchHz !== null) {
+          analyser.getFloatFrequencyData(freqData);
+          const { centroid, diffs } = extractVocalTractFeatures(freqData, audioContext.sampleRate, analyser.fftSize);
+          
+          pitchSamples.push(pitchHz);
+          centroidSamples.push(centroid);
+          for (let i = 0; i < 15; i++) diffsAccumulator[i] += diffs[i];
+          voicedFrames++;
         }
-        samples++;
-      }, 50);
+      }, 40);
 
       setTimeout(() => {
         clearInterval(interval);
         stream.getTracks().forEach(t => t.stop());
-        setEnrolledVoiceprint(Array.from(profileSum).map(v => v / (samples || 1)));
-        setStatus({ type: 'success', message: '🎙️ High-Res Acoustic baseline locked successfully!' });
+        audioContext.close();
+
+        if (voicedFrames < 6) {
+          setStatus({ type: 'error', message: '❌ Voice too quiet or brief. Please speak louder and continuously.' });
+          setIsProcessing(false);
+          return;
+        }
+
+        const profile: BiometricProfile = {
+          f0: getMedian(pitchSamples),
+          centroid: getMedian(centroidSamples),
+          formantDiffs: Array.from(diffsAccumulator).map(v => v / voicedFrames),
+        };
+
+        setEnrolledVoiceprint(profile);
+        setStatus({ 
+          type: 'success', 
+          message: `🎙️ Biometrics Locked! Fundamental Pitch: ${profile.f0.toFixed(1)} Hz | Resonance: ${profile.centroid.toFixed(0)} Hz` 
+        });
         setIsProcessing(false);
-      }, 3000);
+      }, 3500);
     } catch (err: any) {
       setStatus({ type: 'error', message: 'Microphone permission denied.' });
       setIsProcessing(false);
@@ -103,7 +241,7 @@ export default function Home() {
       const verifyJSON = await verifyResp.json();
 
       if (verifyJSON.error) throw new Error(verifyJSON.error);
-      if (verifyJSON.verified) onSuccessRedirect(username, '✅ Passkey & Voice secured! Redirecting...');
+      if (verifyJSON.verified) onSuccessRedirect(username, '✅ Passkey & Voiceprint secured! Redirecting...');
     } catch (error: any) {
       setStatus({ type: 'error', message: error.message });
     }
@@ -140,7 +278,7 @@ export default function Home() {
     setIsProcessing(false);
   };
 
-  // --- IVR LOGIN FLOW: STRICT DECIBEL VERIFICATION ---
+  // --- IVR LOGIN FLOW: SUB-HERTZ VERIFICATION ---
   const requestVoiceChallenge = async () => {
     if (!username) return setStatus({ type: 'error', message: 'Enter a username.' });
     setStatus({ type: 'info', message: 'Generating acoustic cipher...' });
@@ -154,7 +292,7 @@ export default function Home() {
       const data = await resp.json();
       if (data.error) throw new Error(data.error);
       setVoiceChallenge(data.challengePhrase);
-      setStatus({ type: 'info', message: 'Speak the cipher phrase below.' });
+      setStatus({ type: 'info', message: 'Speak the cipher phrase clearly at your normal pitch.' });
     } catch (error: any) {
       setStatus({ type: 'error', message: error.message });
     }
@@ -166,26 +304,38 @@ export default function Home() {
     if (!SpeechRecognition) return setStatus({ type: 'error', message: 'Use Chrome for Speech API.' });
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } 
+      });
       const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
       const source = audioContext.createMediaStreamSource(stream);
       const analyser = audioContext.createAnalyser();
       
-      analyser.fftSize = 2048; 
+      analyser.fftSize = 4096; 
       source.connect(analyser);
 
+      const timeData = new Float32Array(analyser.fftSize);
       const freqData = new Float32Array(analyser.frequencyBinCount);
-      const formantsLength = 300; 
-      let profileSum = new Float32Array(formantsLength);
-      let samples = 0;
+
+      const pitchSamples: number[] = [];
+      const centroidSamples: number[] = [];
+      const diffsAccumulator = new Float32Array(15);
+      let voicedFrames = 0;
 
       const interval = setInterval(() => {
-        analyser.getFloatFrequencyData(freqData);
-        for (let i = 0; i < formantsLength; i++) {
-          profileSum[i] += freqData[i + 3];
+        analyser.getFloatTimeDomainData(timeData);
+        const pitchHz = extractPitchHz(timeData, audioContext.sampleRate);
+
+        if (pitchHz !== null) {
+          analyser.getFloatFrequencyData(freqData);
+          const { centroid, diffs } = extractVocalTractFeatures(freqData, audioContext.sampleRate, analyser.fftSize);
+          
+          pitchSamples.push(pitchHz);
+          centroidSamples.push(centroid);
+          for (let i = 0; i < 15; i++) diffsAccumulator[i] += diffs[i];
+          voicedFrames++;
         }
-        samples++;
-      }, 50);
+      }, 40);
 
       const recognition = new SpeechRecognition();
       recognition.lang = 'en-US';
@@ -193,23 +343,34 @@ export default function Home() {
       
       recognition.onstart = () => {
         setIsListening(true);
-        setStatus({ type: 'info', message: '🎤 Listening... Extracting vocal formants...' });
+        setStatus({ type: 'info', message: '🎤 Listening... Measuring vocal cord Hz & formants...' });
       };
       
       recognition.onresult = async (event: any) => {
         setIsListening(false);
         clearInterval(interval);
         stream.getTracks().forEach(t => t.stop());
+        audioContext.close();
         
-        const finalVoiceprint = Array.from(profileSum).map(v => v / (samples || 1));
+        if (voicedFrames < 3) {
+          setStatus({ type: 'error', message: '❌ Audio too brief to extract Hz biometrics. Speak clearly.' });
+          return;
+        }
+
+        const liveProfile: BiometricProfile = {
+          f0: getMedian(pitchSamples),
+          centroid: getMedian(centroidSamples),
+          formantDiffs: Array.from(diffsAccumulator).map(v => v / voicedFrames),
+        };
+
         const transcript = event.results[0][0].transcript;
-        setStatus({ type: 'info', message: `Analyzing: "${transcript}"...` });
+        setStatus({ type: 'info', message: `Heard "${transcript}" (${liveProfile.f0.toFixed(1)} Hz). Verifying...` });
 
         try {
           const resp = await fetch('/api/ivr/verify', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username, transcript, voiceprint: finalVoiceprint }),
+            body: JSON.stringify({ username, transcript, voiceprint: liveProfile }),
           });
           const data = await resp.json();
           if (data.error) throw new Error(data.error);
@@ -226,6 +387,7 @@ export default function Home() {
         setIsListening(false);
         clearInterval(interval);
         stream.getTracks().forEach(t => t.stop());
+        audioContext.close();
         setStatus({ type: 'error', message: `Audio stream lost: ${event.error}` });
       };
       
@@ -309,7 +471,7 @@ export default function Home() {
 
         <div className="space-y-4">
           
-          {/* USERNAME INPUT (Always Visible) */}
+          {/* USERNAME INPUT */}
           <div className="group">
             <label className="mb-1 block text-xs font-bold uppercase tracking-wider text-slate-400 group-focus-within:text-blue-400 transition-colors">
               Subject Identifier (Username)
@@ -326,7 +488,6 @@ export default function Home() {
           {/* PASSKEY TAB */}
           {activeTab === 'passkey' && (
             <>
-              {/* TOGGLE REGISTRATION FIELDS */}
               <div className="flex items-center justify-end mb-2">
                 <button 
                   onClick={() => setIsLoginMode(!isLoginMode)} 
@@ -355,7 +516,9 @@ export default function Home() {
                       enrolledVoiceprint ? 'bg-purple-900/50 text-purple-200' : 'bg-slate-900 text-purple-400 hover:bg-slate-800'
                     }`}
                   >
-                    {enrolledVoiceprint ? '✅ Voiceprint Captured' : '🎙️ Record Voiceprint (Required)'}
+                    {enrolledVoiceprint 
+                      ? `✅ Voice Locked (${enrolledVoiceprint.f0.toFixed(1)} Hz)` 
+                      : '🎙️ Record Voiceprint (Required)'}
                   </button>
                 </div>
               )}
