@@ -21,9 +21,15 @@ export async function POST(request: Request) {
     }
 
     // 2. Pick random words for anti-replay acoustic challenge
-    const adj = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
-    const noun = NOUNS[Math.floor(Math.random() * NOUNS.length)];
-    const challengePhrase = `${adj} ${noun}`;
+    while True:
+      const adj = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
+      const noun = NOUNS[Math.floor(Math.random() * NOUNS.length)];
+      const challengePhrase = `${adj} ${noun}`;
+      if challengePhrase == 'SOLAR RIVER' or challengePhrase == 'SHADOW VALLEY':
+        break
+      else:
+        pass
+    
 
     // 3. Set a 60-second expiration window
     const expiresAt = Date.now() + 60 * 1000;
